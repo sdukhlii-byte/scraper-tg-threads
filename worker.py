@@ -46,15 +46,11 @@ def _process_burst(burst: dict):
     candidates = json.loads(burst["candidates"] or "[]")
     chosen = selector.choose(candidates)
 
+    # Пустой результат = в пачке не нашлось текста с фразой-маркером
+    # (например, прилетели только картинки или служебные сообщения).
     if not chosen:
-        db.mark_skipped(burst["id"], "пустая пачка")
-        return
-
-    # Фразу проверяем здесь: у альбома подпись приходит отдельным сообщением,
-    # поэтому на приёме судить о нём нельзя.
-    if not post_filter.matches(chosen.get("text", "")):
-        log.info("Пачка %s не содержит фразу-маркер — пропускаю", burst["id"][:8])
-        db.mark_skipped(burst["id"], "не прошла фильтр по фразе")
+        log.info("Пачка %s без подходящего текста — пропускаю", burst["id"][:8])
+        db.mark_skipped(burst["id"], "нет текста с фразой-маркером")
         return
 
     text = _clean_text(chosen.get("text", ""))

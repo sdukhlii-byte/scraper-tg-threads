@@ -74,8 +74,19 @@ async def _save_media(message) -> list:
         "image/jpeg" if kind == "image" else "video/mp4"
     )
     key = db.register_media(path, kind, mime)
-    log.info("Сохранено медиа %s (%s)", os.path.basename(path), kind)
-    return [{"kind": kind, "key": key}]
+
+    # Имя файла из Telegram нужно, чтобы сопоставить картинку с манифестом.
+    filename = ""
+    try:
+        if message.file and message.file.name:
+            filename = message.file.name
+    except Exception:
+        pass
+    if not filename:
+        filename = os.path.basename(path)
+
+    log.info("Сохранено медиа %s (%s)", filename, kind)
+    return [{"kind": kind, "key": key, "filename": filename}]
 
 
 async def _handle(event):
@@ -94,10 +105,11 @@ async def _handle(event):
     if not text and not media:
         return
 
-    # Отсекаем посты без фразы-маркера. У альбома подпись есть только у одной
-    # части, поэтому части альбома пропускаем дальше — решение примет воркер.
+    # Отсекаем текстовые сообщения без фразы-маркера. Сообщения с вложениями
+    # пропускаем всегда: картинки приходят отдельными сообщениями без текста,
+    # и решение по всей пачке принимает воркер.
     grouped_id = getattr(message, "grouped_id", None)
-    if not grouped_id and not post_filter.matches(text):
+    if not media and not grouped_id and not post_filter.matches(text):
         log.info("msg %s без фразы-маркера — пропускаю", message.id)
         return
 
