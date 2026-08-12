@@ -1,31 +1,23 @@
 """
-TG-канал → Threads: автопостинг.
+Telegram-группа → Threads: автопостинг.
 
-Один сервис:
-  - принимает channel_post по вебхуку,
-  - складывает в SQLite (дедупликация, склейка альбомов, ретраи),
-  - фоновый воркер публикует в Threads,
-  - отдаёт медиа наружу по временной публичной ссылке (Threads качает сам).
+Источник читается юзер-сессией Telethon (бот не видит сообщения других ботов).
+Варианты одного материала схлопываются в один пост.
+Медиа раздаётся наружу, потому что Threads скачивает его по URL сам.
 """
 
 import logging
-import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 import db
-import telegram
+import post_filter
+import telegram_source
 import threads_api
 import worker
-from config import (
-    ALBUM_WAIT_SECONDS,
-    ALLOW_EMPTY_TEXT,
-    ALLOWED_CHANNEL_ID,
-    AUTO_SET_WEBHOOK,
-    TELEGRAM_WEBHOOK_SECRET,
-)
+from config import POST_FILTER_PHRASE, SELECT_STRATEGY
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +29,6 @@ log = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
-    log.info("База готова: %s", db.DB_PATH if hasattr(db, "DB_PATH") else "")
 
     try:
         me = threads_api.whoami()
@@ -45,64 +36,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("Не удалось проверить токен Threads: %s", e)
 
-    if AUTO_SET_WEBHOOK:
-        telegram.set_webhook()
+    if post_filter.ENABLED:
+        log.info("Фильтр: публикуются только посты с %r", POST_FILTER_PHRASE)
+    else:
+        log.info("Фильтр выключен: публикуются все посты")
+    log.info("Стратегия выбора из пачки: %s", SELECT_STRATEGY)
 
+    await telegram_source.start()
     worker.start()
     yield
     worker.stop()
+    await telegram_source.stop()
 
 
 app = FastAPI(title="TG → Threads autopost", lifespan=lifespan)
-
-
-@app.post("/telegram/webhook")
-async def telegram_webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: str = Header(default=""),
-):
-    if x_telegram_bot_api_secret_token != TELEGRAM_WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Неверный секрет вебхука")
-
-    update = await request.json()
-    post = update.get("channel_post")
-    if not post:
-        return {"ok": True}
-
-    chat_id = post.get("chat", {}).get("id")
-    if chat_id != ALLOWED_CHANNEL_ID:
-        log.warning("Пост из чужого чата %s — игнорирую", chat_id)
-        return {"ok": True}
-
-    text = telegram.extract_text(post)
-    raw_media = telegram.extract_media(post)
-
-    if not text and not raw_media:
-        return {"ok": True}
-    if not text and not ALLOW_EMPTY_TEXT:
-        return {"ok": True}
-
-    # Регистрируем медиа, чтобы отдать Threads ссылку без токена бота внутри.
-    media = [
-        {"kind": m["kind"], "key": db.register_media(m["file_id"], m["kind"])}
-        for m in raw_media
-    ]
-
-    media_group_id = post.get("media_group_id")
-    # Альбом приходит несколькими апдейтами — ждём, пока долетят остальные части.
-    publish_after = time.time() + (ALBUM_WAIT_SECONDS if media_group_id else 0)
-
-    post_id = db.upsert_post(
-        chat_id=chat_id,
-        message_id=post["message_id"],
-        media_group_id=media_group_id,
-        text=text,
-        media=media,
-        publish_after=publish_after,
-    )
-
-    log.info("Принят пост msg=%s id=%s медиа=%d", post["message_id"], post_id, len(media))
-    return {"ok": True}
 
 
 @app.get("/media/{key}")
@@ -111,14 +58,7 @@ def media(key: str):
     entry = db.get_media(key)
     if not entry:
         raise HTTPException(status_code=404, detail="Не найдено")
-
-    try:
-        stream, content_type = telegram.stream_file(entry["file_id"])
-    except Exception as e:
-        log.error("Не удалось отдать медиа %s: %s", key, e)
-        raise HTTPException(status_code=502, detail="Файл недоступен")
-
-    return StreamingResponse(stream, media_type=content_type)
+    return FileResponse(entry["path"], media_type=entry["mime"])
 
 
 @app.get("/health")
@@ -128,4 +68,13 @@ def health():
 
 @app.get("/status")
 def status():
-    return {"queue": db.stats(), "recent": db.recent_posts(20)}
+    return {"queue": db.stats(), "recent": db.recent_bursts(20)}
+
+
+@app.get("/dialogs")
+async def dialogs():
+    """Список доступных чатов с их id — чтобы найти SOURCE_CHAT_ID."""
+    try:
+        return {"dialogs": await telegram_source.list_dialogs()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
