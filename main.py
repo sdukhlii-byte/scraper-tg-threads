@@ -7,6 +7,7 @@ Telegram-группа → Threads: автопостинг.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -17,7 +18,7 @@ import post_filter
 import telegram_source
 import threads_api
 import worker
-from config import POST_FILTER_PHRASE, SELECT_STRATEGY
+from config import DATA_DIR, MEDIA_DIR, POST_FILTER_PHRASE, SELECT_STRATEGY
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +30,22 @@ log = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+
+    # Проверяем, что каталог для медиа доступен на запись. Без Volume
+    # картинки скачать будет некуда, а посты уйдут без них.
+    try:
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        probe = os.path.join(MEDIA_DIR, ".write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        log.info("Каталог медиа доступен: %s", MEDIA_DIR)
+    except Exception as e:
+        log.error(
+            "КАТАЛОГ МЕДИА НЕДОСТУПЕН (%s): %s. "
+            "Проверь, что Volume примонтирован в %s — иначе посты уйдут без картинок.",
+            MEDIA_DIR, e, DATA_DIR,
+        )
 
     try:
         me = threads_api.whoami()

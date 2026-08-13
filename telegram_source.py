@@ -15,6 +15,7 @@ from telethon.sessions import StringSession
 
 import db
 import post_filter
+import selector
 from config import (
     BURST_WAIT_SECONDS,
     BURST_WINDOW_SECONDS,
@@ -29,6 +30,7 @@ from config import (
 log = logging.getLogger("source")
 
 _client = None
+_loop = None
 
 
 def media_public_url(key: str) -> str:
@@ -58,7 +60,16 @@ async def _save_media(message) -> list:
     if not kind:
         return []
 
-    os.makedirs(MEDIA_DIR, exist_ok=True)
+    try:
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+    except Exception as e:
+        log.error(
+            "Не могу создать каталог %s: %s. "
+            "Скорее всего не примонтирован Volume — медиа сохранять некуда.",
+            MEDIA_DIR, e,
+        )
+        return []
+
     base = os.path.join(MEDIA_DIR, uuid.uuid4().hex)
 
     try:
@@ -68,25 +79,31 @@ async def _save_media(message) -> list:
         return []
 
     if not path:
+        log.warning("msg %s: download_media вернул пусто", message.id)
         return []
 
-    mime = mimetypes.guess_type(path)[0] or (
-        "image/jpeg" if kind == "image" else "video/mp4"
-    )
-    key = db.register_media(path, kind, mime)
-
-    # Имя файла из Telegram нужно, чтобы сопоставить картинку с манифестом.
-    filename = ""
     try:
-        if message.file and message.file.name:
-            filename = message.file.name
-    except Exception:
-        pass
-    if not filename:
-        filename = os.path.basename(path)
+        mime = mimetypes.guess_type(path)[0] or (
+            "image/jpeg" if kind == "image" else "video/mp4"
+        )
+        key = db.register_media(path, kind, mime)
 
-    log.info("Сохранено медиа %s (%s)", filename, kind)
-    return [{"kind": kind, "key": key, "filename": filename}]
+        # Имя файла из Telegram нужно, чтобы сопоставить картинку с манифестом.
+        filename = ""
+        try:
+            if message.file and message.file.name:
+                filename = message.file.name
+        except Exception:
+            pass
+        if not filename:
+            filename = os.path.basename(path)
+
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        log.info("Сохранено медиа %s (%s, %d КБ)", filename, kind, size // 1024)
+        return [{"kind": kind, "key": key, "filename": filename}]
+    except Exception as e:
+        log.error("Не удалось зарегистрировать медиа из msg %s: %s", message.id, e)
+        return []
 
 
 async def _handle(event):
@@ -100,15 +117,38 @@ async def _handle(event):
         return
 
     text = (message.text or message.message or "").strip()
+
+    kind = _kind_of(message)
+    has_attachment = bool(message.media)
+    log.info(
+        "Входящее msg %s: текст %d симв., вложение=%s%s",
+        message.id, len(text),
+        kind or "нет",
+        " (тип не поддерживается)" if has_attachment and not kind else "",
+    )
+
     media = await _save_media(message)
 
     if not text and not media:
         return
 
-    # Отсекаем текстовые сообщения без фразы-маркера. Сообщения с вложениями
-    # пропускаем всегда: картинки приходят отдельными сообщениями без текста,
-    # и решение по всей пачке принимает воркер.
     grouped_id = getattr(message, "grouped_id", None)
+
+    # Манифест открывает новый пост и закрывает предыдущий: источник шлёт
+    # посты подряд, и по одному лишь таймауту их не разделить.
+    if selector.is_manifest(text):
+        info = selector.parse_manifest(text)
+        db.close_open_bursts(chat_id)
+        burst_id = db.start_burst(chat_id, text, BURST_WAIT_SECONDS)
+        log.info(
+            "msg %s — манифест [%s] %r: %d файл(ов) -> новая пачка %s",
+            message.id, info["type"] or "без типа", info["title"],
+            len(info["links"]) or len(info["filenames"]), burst_id[:8],
+        )
+        return
+
+    # Текст без фразы-маркера не нужен. Сообщения с вложениями пропускаем
+    # всегда: у картинок нет подписи.
     if not media and not grouped_id and not post_filter.matches(text):
         log.info("msg %s без фразы-маркера — пропускаю", message.id)
         return
@@ -131,9 +171,44 @@ async def _handle(event):
              message.id, burst_id[:8], len(text), len(media))
 
 
+async def fetch_by_links(links: list) -> list:
+    """
+    Запасной путь: скачать картинки по ссылкам вида https://t.me/c/<chat>/<msg>
+    из манифеста. Нужен, если сами файлы почему-то не долетели
+    отдельными сообщениями (например, сервис стартовал позже).
+    """
+    if not _client:
+        return []
+
+    out = []
+    for chat_part, msg_id in links:
+        try:
+            message = await _client.get_messages(SOURCE_CHAT_ID, ids=int(msg_id))
+            if not message:
+                continue
+            saved = await _save_media(message)
+            out.extend(saved)
+        except Exception as e:
+            log.warning("Не удалось забрать msg %s по ссылке: %s", msg_id, e)
+    return out
+
+
+def fetch_by_links_sync(links: list, timeout: int = 180) -> list:
+    """
+    Синхронная обёртка для вызова из воркера: он работает в отдельном потоке,
+    а Telethon живёт в основном цикле asyncio.
+    """
+    if not _loop or not links:
+        return []
+    future = asyncio.run_coroutine_threadsafe(fetch_by_links(links), _loop)
+    return future.result(timeout=timeout)
+
+
 async def start():
     """Запускает клиент и вешает обработчик новых сообщений."""
-    global _client
+    global _client, _loop
+
+    _loop = asyncio.get_running_loop()
 
     _client = TelegramClient(
         StringSession(TELEGRAM_STRING_SESSION),

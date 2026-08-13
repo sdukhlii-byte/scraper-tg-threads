@@ -15,6 +15,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS bursts (
     id            TEXT PRIMARY KEY,
     chat_id       INTEGER NOT NULL,
+    manifest      TEXT NOT NULL DEFAULT '',
     candidates    TEXT NOT NULL DEFAULT '[]',
     status        TEXT NOT NULL DEFAULT 'open',
     attempts      INTEGER NOT NULL DEFAULT 0,
@@ -88,13 +89,41 @@ def mark_seen(chat_id: int, message_id: int) -> bool:
 
 # --- Пачки ---
 
+def close_open_bursts(chat_id: int):
+    """
+    Закрывает открытые пачки чата: пришёл новый манифест, значит предыдущий
+    пост собран полностью и его можно публиковать не дожидаясь таймаута.
+    """
+    now = time.time()
+    with _lock:
+        _conn.execute(
+            "UPDATE bursts SET status = 'pending', publish_after = ?, updated_at = ?"
+            " WHERE chat_id = ? AND status = 'open'",
+            (now, now, chat_id),
+        )
+        _conn.commit()
+
+
+def start_burst(chat_id: int, manifest: str, burst_wait: float) -> str:
+    """Открывает новую пачку от манифеста."""
+    now = time.time()
+    burst_id = uuid.uuid4().hex
+    with _lock:
+        _conn.execute(
+            "INSERT INTO bursts (id, chat_id, manifest, candidates, status,"
+            " publish_after, last_msg_at, created_at, updated_at)"
+            " VALUES (?, ?, ?, '[]', 'open', ?, ?, ?, ?)",
+            (burst_id, chat_id, manifest, now + burst_wait, now, now, now),
+        )
+        _conn.commit()
+    return burst_id
+
+
 def add_candidate(chat_id: int, candidate: dict, burst_window: float,
                   burst_wait: float, grouped_id=None) -> str:
     """
-    Кладёт вариант поста в открытую пачку этого чата либо создаёт новую.
-
-    Если у сообщения есть grouped_id (альбом), медиа подклеивается
-    к уже существующему кандидату той же группы.
+    Кладёт сообщение в открытую пачку чата либо создаёт новую без манифеста
+    (запасной путь, если источник прислал текст без манифеста).
     """
     now = time.time()
     with _lock:
@@ -132,9 +161,9 @@ def add_candidate(chat_id: int, candidate: dict, burst_window: float,
 
         burst_id = uuid.uuid4().hex
         _conn.execute(
-            "INSERT INTO bursts (id, chat_id, candidates, status, publish_after,"
-            " last_msg_at, created_at, updated_at)"
-            " VALUES (?, ?, ?, 'open', ?, ?, ?, ?)",
+            "INSERT INTO bursts (id, chat_id, manifest, candidates, status,"
+            " publish_after, last_msg_at, created_at, updated_at)"
+            " VALUES (?, ?, '', ?, 'open', ?, ?, ?, ?)",
             (burst_id, chat_id, json.dumps([candidate]), now + burst_wait, now, now, now),
         )
         _conn.commit()

@@ -1,36 +1,89 @@
-"""Выбор текста и картинок из пачки сообщений.
+"""Разбор манифеста и выбор содержимого поста.
 
-Источник присылает один материал россыпью:
-  - картинки отдельными сообщениями (01-picks.png, 02-analysis.png)
-  - манифест вида "threads · Матч / 01-picks.png · ссылка / 02-analysis.png · ссылка"
-  - несколько текстовых вариантов (instagram, x, длинный) — все с фразой-маркером
+Формат источника:
 
-В Threads должен уйти один пост: один текст + все относящиеся к нему картинки.
+    [картинки]  01-picks.png, 02-analysis.png       (отдельными сообщениями)
+    [манифест]  threads · scoreboard · Team Spirit vs Luminosity Gaming
+                01-picks.png · https://t.me/c/4346691060/11
+                02-analysis.png · https://t.me/c/4346691060/12
+    [текст]     🤖 10 AI models pick ... 🎮 Link in bio
+
+Манифест служит разделителем: он говорит, какие файлы относятся к посту,
+и одновременно закрывает предыдущий пост. Картинки берутся по ссылкам
+из манифеста — это надёжнее, чем угадывать по времени поступления.
 """
 
 import logging
 import re
 
 import post_filter
-from config import SELECT_STRATEGY
+from config import MANIFEST_TYPES, SELECT_STRATEGY
 
 log = logging.getLogger("selector")
 
-# Манифест: строка, начинающаяся со слова threads, где перечислены файлы.
-MANIFEST_RE = re.compile(r"^\s*threads\s*[·:\-]", re.IGNORECASE)
+# threads · <тип> · <матч>   либо   threads · <матч>
+MANIFEST_RE = re.compile(r"^\s*threads\s*[·:\-]\s*(.+)$", re.IGNORECASE)
 FILENAME_RE = re.compile(r"([\w\-. ]+\.(?:png|jpe?g|webp|gif|mp4|mov))", re.IGNORECASE)
+TME_LINK_RE = re.compile(r"https?://t\.me/c/(\d+)/(\d+)")
+
+_WANTED_TYPES = [t.strip().lower() for t in MANIFEST_TYPES.split(",") if t.strip()]
 
 
-def _find_manifest(candidates: list) -> str:
-    for c in candidates:
-        text = c.get("text", "")
-        if text and MANIFEST_RE.match(text) and FILENAME_RE.search(text):
-            return text
-    return ""
+def is_manifest(text: str) -> bool:
+    """Манифест — служебное сообщение со списком файлов для Threads."""
+    if not text:
+        return False
+    return bool(MANIFEST_RE.match(text) and FILENAME_RE.search(text))
+
+
+def parse_manifest(text: str) -> dict:
+    """
+    Разбирает шапку манифеста.
+
+    'threads · scoreboard · Team Spirit vs Luminosity'
+        -> {'type': 'scoreboard', 'title': 'Team Spirit vs Luminosity'}
+    'threads · Team Spirit vs Luminosity'
+        -> {'type': '', 'title': 'Team Spirit vs Luminosity'}
+    """
+    if not text:
+        return {"type": "", "title": "", "links": [], "filenames": []}
+
+    head = text.splitlines()[0]
+    m = MANIFEST_RE.match(head)
+    rest = m.group(1).strip() if m else ""
+
+    parts = [p.strip() for p in re.split(r"\s*[·|]\s*", rest) if p.strip()]
+    if len(parts) >= 2:
+        kind, title = parts[0].lower(), " · ".join(parts[1:])
+    else:
+        kind, title = "", (parts[0] if parts else "")
+
+    return {
+        "type": kind,
+        "title": title,
+        "links": TME_LINK_RE.findall(text),
+        "filenames": [n.strip().lower() for n in FILENAME_RE.findall(text)],
+    }
+
+
+def type_allowed(manifest_type: str) -> bool:
+    """Фильтр по типу манифеста. Пустой список = разрешены все типы."""
+    if not _WANTED_TYPES:
+        return True
+    return (manifest_type or "").lower() in _WANTED_TYPES
+
+
+def _media_by_filenames(filenames: list, media: list) -> list:
+    """Оставляет вложения, перечисленные в манифесте, в его порядке."""
+    by_name = {}
+    for m in media:
+        name = (m.get("filename") or "").strip().lower()
+        if name:
+            by_name.setdefault(name, m)
+    return [by_name[n] for n in filenames if n in by_name]
 
 
 def _all_media(candidates: list) -> list:
-    """Все вложения пачки в порядке поступления, без повторов."""
     media, seen = [], set()
     for c in candidates:
         for m in c.get("media", []):
@@ -40,46 +93,24 @@ def _all_media(candidates: list) -> list:
     return media
 
 
-def _media_by_manifest(manifest: str, media: list) -> list:
+def choose(burst_manifest: str, candidates: list) -> dict:
     """
-    Оставляет только файлы, перечисленные в манифесте, и в том же порядке.
-    Если ничего не совпало — возвращает пустой список, решение примет вызывающий.
+    Возвращает {'text', 'media', 'manifest_links', 'message_id'}
+    либо {} если публиковать нечего.
     """
-    wanted = [n.strip().lower() for n in FILENAME_RE.findall(manifest)]
-    by_name = {}
-    for m in media:
-        name = (m.get("filename") or "").strip().lower()
-        if name:
-            by_name.setdefault(name, m)
+    manifest = parse_manifest(burst_manifest) if burst_manifest else {
+        "type": "", "title": "", "links": [], "filenames": []
+    }
 
-    ordered = [by_name[n] for n in wanted if n in by_name]
-    return ordered
-
-
-def choose(candidates: list) -> dict:
-    """
-    Возвращает {'text', 'media', 'message_id'} либо {} если публиковать нечего.
-
-    Текст берётся из вариантов, прошедших фильтр:
-      longest — самый информативный (по умолчанию)
-      first   — первый пришедший
-      last    — последний пришедший
-
-    Картинки собираются со всей пачки; если есть манифест, он задаёт
-    состав и порядок.
-    """
-    if not candidates:
+    if burst_manifest and not type_allowed(manifest["type"]):
+        log.info("Тип манифеста %r не в списке разрешённых — пропускаю",
+                 manifest["type"])
         return {}
 
-    manifest = _find_manifest(candidates)
-
-    # Текстовые варианты: манифест и подписи к картинкам сюда не попадают,
-    # потому что не содержат фразу-маркер.
     text_candidates = [
         c for c in candidates
-        if c.get("text") and post_filter.matches(c["text"]) and c["text"] != manifest
+        if c.get("text") and post_filter.matches(c["text"])
     ]
-
     if not text_candidates:
         return {}
 
@@ -91,26 +122,21 @@ def choose(candidates: list) -> dict:
         chosen = max(text_candidates, key=lambda c: len(c.get("text", "")))
 
     media = _all_media(candidates)
-
-    if manifest:
-        picked = _media_by_manifest(manifest, media)
+    if manifest["filenames"]:
+        picked = _media_by_filenames(manifest["filenames"], media)
         if picked:
-            log.info("Манифест задал %d файл(ов) из %d доступных",
-                     len(picked), len(media))
             media = picked
-        else:
-            log.warning("Манифест найден, но файлы не сопоставились — беру все")
 
-    if len(candidates) > 1:
-        log.info(
-            "Пачка: %d сообщений, %d текстовых вариантов, %d медиа."
-            " Выбран msg %s (%d симв.) по стратегии %s",
-            len(candidates), len(text_candidates), len(media),
-            chosen.get("message_id"), len(chosen.get("text", "")), SELECT_STRATEGY,
-        )
+    if len(text_candidates) > 1:
+        log.info("Вариантов текста: %d, выбран msg %s (%d симв.) по стратегии %s",
+                 len(text_candidates), chosen.get("message_id"),
+                 len(chosen.get("text", "")), SELECT_STRATEGY)
 
     return {
         "message_id": chosen.get("message_id"),
         "text": chosen.get("text", ""),
         "media": media,
+        "manifest_links": manifest["links"],
+        "manifest_type": manifest["type"],
+        "manifest_title": manifest["title"],
     }

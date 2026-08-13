@@ -44,7 +44,7 @@ def _clean_text(text: str) -> str:
 
 def _process_burst(burst: dict):
     candidates = json.loads(burst["candidates"] or "[]")
-    chosen = selector.choose(candidates)
+    chosen = selector.choose(burst.get("manifest", ""), candidates)
 
     # Пустой результат = в пачке не нашлось текста с фразой-маркером
     # (например, прилетели только картинки или служебные сообщения).
@@ -54,9 +54,21 @@ def _process_burst(burst: dict):
         return
 
     text = _clean_text(chosen.get("text", ""))
+    media_entries = chosen.get("media", [])
+
+    # Если манифест перечисляет файлы, а самих сообщений с картинками в пачке
+    # нет — забираем их по ссылкам из манифеста.
+    if not media_entries and chosen.get("manifest_links"):
+        log.info("Картинок в пачке нет, тяну %d шт. по ссылкам из манифеста",
+                 len(chosen["manifest_links"]))
+        try:
+            media_entries = telegram_source.fetch_by_links_sync(chosen["manifest_links"])
+        except Exception as e:
+            log.error("Не удалось забрать картинки по ссылкам: %s", e)
+
     media = [
         {"kind": m["kind"], "url": telegram_source.media_public_url(m["key"])}
-        for m in chosen.get("media", [])
+        for m in media_entries
     ]
 
     if not text and not media:

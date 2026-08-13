@@ -53,6 +53,11 @@ BURST_WAIT_SECONDS = int(_opt("BURST_WAIT_SECONDS", "45"))
 # Какой вариант из пачки публиковать: longest | first | last
 SELECT_STRATEGY = _opt("SELECT_STRATEGY", "longest").lower()
 
+# Публиковать только манифесты этих типов, через запятую.
+# Тип берётся из шапки: "threads · scoreboard · Матч" -> scoreboard.
+# Пусто = публиковать все типы.
+MANIFEST_TYPES = _opt("MANIFEST_TYPES", "")
+
 # --- Прочее ---
 WORKER_INTERVAL_SECONDS = int(_opt("WORKER_INTERVAL_SECONDS", "10"))
 MAX_ATTEMPTS = int(_opt("MAX_ATTEMPTS", "5"))
