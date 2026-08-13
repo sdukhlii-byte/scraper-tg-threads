@@ -33,7 +33,10 @@ def is_manifest(text: str) -> bool:
     """Манифест — служебное сообщение со списком файлов для Threads."""
     if not text:
         return False
-    return bool(MANIFEST_RE.match(text) and FILENAME_RE.search(text))
+    # Шапку проверяем по первой строке: манифест многострочный, а MANIFEST_RE
+    # без флага MULTILINE привязан к концу всей строки.
+    head = text.splitlines()[0]
+    return bool(MANIFEST_RE.match(head) and FILENAME_RE.search(text))
 
 
 def parse_manifest(text: str) -> dict:

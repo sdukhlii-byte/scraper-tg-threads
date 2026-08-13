@@ -119,7 +119,9 @@ async def _handle(event):
     text = (message.text or message.message or "").strip()
 
     kind = _kind_of(message)
-    has_attachment = bool(message.media)
+    # Превью ссылки — это тоже media, но вложением не является.
+    is_webpage = type(getattr(message, "media", None)).__name__ == "MessageMediaWebPage"
+    has_attachment = bool(message.media) and not is_webpage
     log.info(
         "Входящее msg %s: текст %d симв., вложение=%s%s",
         message.id, len(text),

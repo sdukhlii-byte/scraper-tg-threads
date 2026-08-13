@@ -65,10 +65,44 @@ def _connect() -> sqlite3.Connection:
 _conn = _connect()
 
 
+def _migrate():
+    """
+    Дописывает колонки, появившиеся в новых версиях.
+    CREATE TABLE IF NOT EXISTS существующую таблицу не меняет, поэтому база
+    со старой схемой на Volume переживает деплой и ломает вставки.
+    """
+    expected = {
+        "bursts": {
+            "manifest": "TEXT NOT NULL DEFAULT ''",
+            "threads_ids": "TEXT",
+            "error": "TEXT",
+        },
+        "media": {
+            "mime": "TEXT NOT NULL DEFAULT 'application/octet-stream'",
+        },
+    }
+
+    for table, columns in expected.items():
+        try:
+            rows = _conn.execute(f"PRAGMA table_info({table})").fetchall()
+        except sqlite3.OperationalError:
+            continue
+        if not rows:
+            continue
+
+        existing = {r["name"] for r in rows}
+        for name, ddl in columns.items():
+            if name not in existing:
+                _conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                print(f"[db] Добавлена колонка {table}.{name}")
+    _conn.commit()
+
+
 def init():
     with _lock:
         _conn.executescript(SCHEMA)
         _conn.commit()
+        _migrate()
 
 
 # --- Дедупликация входящих сообщений ---
