@@ -12,11 +12,16 @@ import post_filter
 import selector
 import telegram_source
 import threads_api
+import x_api
 from config import (
     ALLOW_EMPTY_TEXT,
     MAX_ATTEMPTS,
+    SELECT_STRATEGY,
     STRIP_HASHTAGS,
+    THREADS_ENABLED,
     WORKER_INTERVAL_SECONDS,
+    X_ENABLED,
+    X_SELECT_STRATEGY,
 )
 
 log = logging.getLogger("worker")
@@ -42,48 +47,110 @@ def _clean_text(text: str) -> str:
     return text
 
 
-def _process_burst(burst: dict):
-    candidates = json.loads(burst["candidates"] or "[]")
-    chosen = selector.choose(burst.get("manifest", ""), candidates)
-
-    # Пустой результат = в пачке не нашлось текста с фразой-маркером
-    # (например, прилетели только картинки или служебные сообщения).
+def _publish_threads(burst: dict, candidates: list) -> list:
+    chosen = selector.choose(burst.get("manifest", ""), candidates, SELECT_STRATEGY)
     if not chosen:
-        log.info("Пачка %s без подходящего текста — пропускаю", burst["id"][:8])
-        db.mark_skipped(burst["id"], "нет текста с фразой-маркером")
-        return
+        return None
 
     text = _clean_text(chosen.get("text", ""))
-    media_entries = chosen.get("media", [])
-
-    # Если манифест перечисляет файлы, а самих сообщений с картинками в пачке
-    # нет — забираем их по ссылкам из манифеста.
-    if not media_entries and chosen.get("manifest_links"):
-        log.info("Картинок в пачке нет, тяну %d шт. по ссылкам из манифеста",
-                 len(chosen["manifest_links"]))
-        try:
-            media_entries = telegram_source.fetch_by_links_sync(chosen["manifest_links"])
-        except Exception as e:
-            log.error("Не удалось забрать картинки по ссылкам: %s", e)
+    media_entries = _resolve_media(chosen)
 
     media = [
         {"kind": m["kind"], "url": telegram_source.media_public_url(m["key"])}
         for m in media_entries
     ]
-
     if not text and not media:
-        db.mark_skipped(burst["id"], "после обработки не осталось контента")
-        return
+        return None
     if not text and not ALLOW_EMPTY_TEXT:
-        db.mark_skipped(burst["id"], "пост без текста")
+        return None
+
+    log.info("Threads: публикую msg %s, медиа %d",
+             chosen.get("message_id"), len(media))
+    return threads_api.publish(text, media)
+
+
+def _publish_x(burst: dict, candidates: list) -> list:
+    chosen = selector.choose(burst.get("manifest", ""), candidates, X_SELECT_STRATEGY)
+    if not chosen:
+        return None
+
+    text = _clean_text(chosen.get("text", ""))
+    media_entries = _resolve_media(chosen)
+
+    if not text and not media_entries:
+        return None
+    if not text and not ALLOW_EMPTY_TEXT:
+        return None
+
+    log.info("X: публикую msg %s (%d симв.), медиа %d",
+             chosen.get("message_id"), len(text), len(media_entries))
+    return x_api.publish(text, media_entries)
+
+
+def _resolve_media(chosen: dict) -> list:
+    """Медиа пачки; если его нет — тянем по ссылкам из манифеста."""
+    entries = chosen.get("media", [])
+    if entries or not chosen.get("manifest_links"):
+        return entries
+
+    log.info("Картинок в пачке нет, тяну %d шт. по ссылкам из манифеста",
+             len(chosen["manifest_links"]))
+    try:
+        return telegram_source.fetch_by_links_sync(chosen["manifest_links"])
+    except Exception as e:
+        log.error("Не удалось забрать картинки по ссылкам: %s", e)
+        return []
+
+
+PUBLISHERS = []
+if THREADS_ENABLED:
+    PUBLISHERS.append(("threads", _publish_threads))
+if X_ENABLED:
+    PUBLISHERS.append(("x", _publish_x))
+
+
+def _process_burst(burst: dict):
+    candidates = json.loads(burst["candidates"] or "[]")
+
+    if not PUBLISHERS:
+        db.mark_skipped(burst["id"], "не включена ни одна площадка")
         return
 
-    log.info("Публикую пачку %s (msg %s, медиа %d)",
-             burst["id"][:8], chosen.get("message_id"), len(media))
+    # Что уже улетело в прошлые попытки — не публикуем повторно.
+    done = db.get_results(burst["id"])
+    pending = [(name, fn) for name, fn in PUBLISHERS if name not in done]
 
-    threads_ids = threads_api.publish(text, media)
-    db.mark_posted(burst["id"], threads_ids)
-    log.info("Опубликовано: %s", threads_ids)
+    if not pending:
+        db.mark_posted(burst["id"], done.get("threads", []))
+        return
+
+    errors = []
+    nothing_to_post = 0
+
+    for name, publish_fn in pending:
+        try:
+            ids = publish_fn(burst, candidates)
+            if ids is None:
+                nothing_to_post += 1
+                continue
+            db.save_result(burst["id"], name, ids)
+            log.info("%s: опубликовано %s", name, ids)
+        except Exception as e:
+            log.error("%s: ошибка публикации — %s", name, e)
+            errors.append(f"{name}: {e}")
+
+    if errors:
+        # Часть площадок могла отработать успешно — она уже записана в results
+        # и в повторной попытке участвовать не будет.
+        raise RuntimeError("; ".join(errors))
+
+    results = db.get_results(burst["id"])
+    if not results:
+        log.info("Пачка %s: публиковать нечего", burst["id"][:8])
+        db.mark_skipped(burst["id"], "нет текста с фразой-маркером")
+        return
+
+    db.mark_posted(burst["id"], results.get("threads", []))
 
 
 def _cleanup_media():
@@ -113,7 +180,7 @@ def _tick():
 
     now = time.time()
 
-    if now - _last_token_check > TOKEN_CHECK_INTERVAL:
+    if THREADS_ENABLED and now - _last_token_check > TOKEN_CHECK_INTERVAL:
         _last_token_check = now
         try:
             threads_api.refresh_token_if_needed()

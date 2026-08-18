@@ -96,11 +96,15 @@ def _all_media(candidates: list) -> list:
     return media
 
 
-def choose(burst_manifest: str, candidates: list) -> dict:
+def choose(burst_manifest: str, candidates: list, strategy: str = None) -> dict:
     """
     Возвращает {'text', 'media', 'manifest_links', 'message_id'}
     либо {} если публиковать нечего.
+
+    strategy переопределяет SELECT_STRATEGY — у каждой площадки свой лимит
+    символов, поэтому X обычно берёт короткий вариант, а Threads длинный.
     """
+    strategy = (strategy or SELECT_STRATEGY).lower()
     manifest = parse_manifest(burst_manifest) if burst_manifest else {
         "type": "", "title": "", "links": [], "filenames": []
     }
@@ -117,10 +121,12 @@ def choose(burst_manifest: str, candidates: list) -> dict:
     if not text_candidates:
         return {}
 
-    if SELECT_STRATEGY == "first":
+    if strategy == "first":
         chosen = text_candidates[0]
-    elif SELECT_STRATEGY == "last":
+    elif strategy == "last":
         chosen = text_candidates[-1]
+    elif strategy == "shortest":
+        chosen = min(text_candidates, key=lambda c: len(c.get("text", "")))
     else:
         chosen = max(text_candidates, key=lambda c: len(c.get("text", "")))
 
@@ -133,7 +139,7 @@ def choose(burst_manifest: str, candidates: list) -> dict:
     if len(text_candidates) > 1:
         log.info("Вариантов текста: %d, выбран msg %s (%d симв.) по стратегии %s",
                  len(text_candidates), chosen.get("message_id"),
-                 len(chosen.get("text", "")), SELECT_STRATEGY)
+                 len(chosen.get("text", "")), strategy)
 
     return {
         "message_id": chosen.get("message_id"),

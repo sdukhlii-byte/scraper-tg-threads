@@ -18,7 +18,16 @@ import post_filter
 import telegram_source
 import threads_api
 import worker
-from config import DATA_DIR, MEDIA_DIR, POST_FILTER_PHRASE, SELECT_STRATEGY
+import x_api
+from config import (
+    DATA_DIR,
+    MEDIA_DIR,
+    POST_FILTER_PHRASE,
+    SELECT_STRATEGY,
+    THREADS_ENABLED,
+    X_ENABLED,
+    X_SELECT_STRATEGY,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,17 +56,29 @@ async def lifespan(app: FastAPI):
             MEDIA_DIR, e, DATA_DIR,
         )
 
-    try:
-        me = threads_api.whoami()
-        log.info("Threads-аккаунт: %s (id %s)", me.get("username"), me.get("id"))
-    except Exception as e:
-        log.error("Не удалось проверить токен Threads: %s", e)
+    if THREADS_ENABLED:
+        try:
+            me = threads_api.whoami()
+            log.info("Threads-аккаунт: %s (id %s)", me.get("username"), me.get("id"))
+        except Exception as e:
+            log.error("Не удалось проверить токен Threads: %s", e)
+    else:
+        log.info("Threads отключён (THREADS_ENABLED=false)")
+
+    if X_ENABLED:
+        try:
+            me = x_api.whoami()
+            log.info("X-аккаунт: @%s (id %s)", me.get("username"), me.get("id"))
+        except Exception as e:
+            log.error("Не удалось проверить ключи X: %s", e)
+    else:
+        log.info("X отключён (X_ENABLED=false)")
 
     if post_filter.ENABLED:
         log.info("Фильтр: публикуются только посты с %r", POST_FILTER_PHRASE)
     else:
         log.info("Фильтр выключен: публикуются все посты")
-    log.info("Стратегия выбора из пачки: %s", SELECT_STRATEGY)
+    log.info("Стратегия выбора: Threads=%s, X=%s", SELECT_STRATEGY, X_SELECT_STRATEGY)
 
     await telegram_source.start()
     worker.start()

@@ -25,8 +25,30 @@ TELEGRAM_STRING_SESSION = _req("TELEGRAM_STRING_SESSION")
 SOURCE_CHAT_ID = int(_req("SOURCE_CHAT_ID"))
 
 # --- Threads ---
-THREADS_ACCESS_TOKEN = _req("THREADS_ACCESS_TOKEN")
-THREADS_USER_ID = _req("THREADS_USER_ID")
+THREADS_ENABLED = _opt("THREADS_ENABLED", "true").lower() == "true"
+THREADS_ACCESS_TOKEN = _opt("THREADS_ACCESS_TOKEN")
+THREADS_USER_ID = _opt("THREADS_USER_ID")
+
+if THREADS_ENABLED and not (THREADS_ACCESS_TOKEN and THREADS_USER_ID):
+    raise RuntimeError(
+        "THREADS_ENABLED=true, но не заданы THREADS_ACCESS_TOKEN / THREADS_USER_ID"
+    )
+
+# --- X (Twitter) ---
+# OAuth 1.0a user context: ключи приложения + токены доступа своего аккаунта.
+# Берутся в X Developer Portal -> Keys and tokens.
+X_ENABLED = _opt("X_ENABLED", "false").lower() == "true"
+X_API_KEY = _opt("X_API_KEY")
+X_API_SECRET = _opt("X_API_SECRET")
+X_ACCESS_TOKEN = _opt("X_ACCESS_TOKEN")
+X_ACCESS_SECRET = _opt("X_ACCESS_SECRET")
+X_TEXT_LIMIT = int(_opt("X_TEXT_LIMIT", "280"))
+
+if X_ENABLED and not all([X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET]):
+    raise RuntimeError(
+        "X_ENABLED=true, но заданы не все ключи: "
+        "X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET"
+    )
 
 # --- Сервис ---
 # Публичный адрес на Railway без слэша в конце - по нему Threads качает медиа.
@@ -50,8 +72,13 @@ STRIP_FILTER_PHRASE = _opt("STRIP_FILTER_PHRASE", "false").lower() == "true"
 BURST_WINDOW_SECONDS = int(_opt("BURST_WINDOW_SECONDS", "180"))
 # Сколько ждать после последнего сообщения пачки, прежде чем публиковать.
 BURST_WAIT_SECONDS = int(_opt("BURST_WAIT_SECONDS", "45"))
-# Какой вариант из пачки публиковать: longest | first | last
+# Какой вариант из пачки публиковать: longest | shortest | first | last
+# Для Threads (лимит 500) обычно подходит длинный вариант.
 SELECT_STRATEGY = _opt("SELECT_STRATEGY", "longest").lower()
+
+# Отдельная стратегия для X: лимит 280 символов, поэтому по умолчанию
+# берётся самый короткий вариант, чтобы не резать пост в тред.
+X_SELECT_STRATEGY = _opt("X_SELECT_STRATEGY", "shortest").lower()
 
 # Публиковать только манифесты этих типов, через запятую.
 # Тип берётся из шапки: "threads · scoreboard · Матч" -> scoreboard.

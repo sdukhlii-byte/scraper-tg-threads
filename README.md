@@ -1,7 +1,7 @@
-# Telegram-группа → Threads: автопостинг
+# Telegram-группа → Threads и X: автопостинг
 
 Читает группу, отбирает нужные посты по фразе-маркеру, схлопывает варианты
-одного материала в один пост и публикует в Threads.
+одного материала в один пост и публикует в Threads и/или X (Twitter).
 
 ## Почему юзер-сессия, а не бот
 
@@ -60,8 +60,8 @@
 | `TELEGRAM_API_HASH` | оттуда же |
 | `TELEGRAM_STRING_SESSION` | из `gen_session.py`, запускается локально |
 | `SOURCE_CHAT_ID` | ID группы, например `-1001234567890` |
-| `THREADS_ACCESS_TOKEN` | токен из User Token Generator |
-| `THREADS_USER_ID` | id аккаунта Threads |
+| `THREADS_ACCESS_TOKEN` | токен из User Token Generator (если Threads включён) |
+| `THREADS_USER_ID` | id аккаунта Threads (если Threads включён) |
 | `PUBLIC_BASE_URL` | публичный домен Railway, без слэша в конце |
 
 ### Необязательные
@@ -75,6 +75,47 @@
 | `BURST_WAIT_SECONDS` | `45` | пауза после последнего сообщения пачки |
 | `SELECT_STRATEGY` | `longest` | какой вариант публиковать: `longest`/`first`/`last` |
 | `MANIFEST_TYPES` | пусто | публиковать только эти типы манифеста, через запятую |
+| `THREADS_ENABLED` | `true` | публиковать в Threads |
+| `X_ENABLED` | `false` | публиковать в X (Twitter) |
+| `X_API_KEY` / `X_API_SECRET` | — | Consumer Keys из X Developer Portal |
+| `X_ACCESS_TOKEN` / `X_ACCESS_SECRET` | — | Access Token с правами Read and write |
+| `X_SELECT_STRATEGY` | `shortest` | какой вариант текста уходит в X |
+| `X_TEXT_LIMIT` | `280` | лимит символов X |
+
+## Публикация в X (Twitter)
+
+### Ключи
+
+X Developer Portal → проект → **Keys and tokens**:
+- Consumer Keys → `X_API_KEY`, `X_API_SECRET`
+- Access Token and Secret → `X_ACCESS_TOKEN`, `X_ACCESS_SECRET`
+
+Важно: в настройках приложения (User authentication settings) должно стоять
+**Read and write**. Если права были Read only, токены нужно перевыпустить
+после изменения — старые останутся только на чтение.
+
+### Тарификация
+
+С февраля 2026 X перешёл на pay-per-use, бесплатного тарифа для новых
+разработчиков нет — кредиты покупаются заранее в Developer Console.
+
+Ориентиры: около **$0.015 за пост** и около **$0.20 за пост с URL** в тексте.
+Разница в 13 раз, поэтому прямые ссылки в постах невыгодны — формулировка
+вида «Link in bio» попадает в дешёвую категорию.
+
+При 10 постах в день выходит примерно $4-5 в месяц.
+
+### Отличия от Threads
+
+| | Threads | X |
+|---|---|---|
+| Лимит текста | 500 | 280 |
+| Вложений | до 20 | до 4 |
+| Как получает медиа | качает по URL с нашего сервиса | файл загружается напрямую |
+| Стратегия текста | `longest` | `shortest` |
+
+Площадки публикуются независимо: если одна упала, вторая всё равно
+отработает, а при повторной попытке успешная не будет продублирована.
 | `WORKER_INTERVAL_SECONDS` | `10` | интервал воркера |
 | `MAX_ATTEMPTS` | `5` | попыток публикации до статуса `failed` |
 | `ALLOW_EMPTY_TEXT` | `true` | публиковать посты без текста |

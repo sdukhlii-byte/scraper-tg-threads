@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS bursts (
     attempts      INTEGER NOT NULL DEFAULT 0,
     error         TEXT,
     threads_ids   TEXT,
+    results       TEXT NOT NULL DEFAULT '{}',
     publish_after REAL NOT NULL DEFAULT 0,
     last_msg_at   REAL NOT NULL,
     created_at    REAL NOT NULL,
@@ -74,6 +75,7 @@ def _migrate():
     expected = {
         "bursts": {
             "manifest": "TEXT NOT NULL DEFAULT ''",
+            "results": "TEXT NOT NULL DEFAULT '{}'",
             "threads_ids": "TEXT",
             "error": "TEXT",
         },
@@ -222,13 +224,49 @@ def claim_ready_bursts(limit: int = 5) -> list:
         return [dict(r) for r in rows]
 
 
-def mark_posted(burst_id: str, threads_ids: list):
+def get_results(burst_id: str) -> dict:
+    """Что уже опубликовано по площадкам: {'threads': [ids], 'x': [ids]}."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT results FROM bursts WHERE id = ?", (burst_id,)
+        ).fetchone()
+    if not row:
+        return {}
+    try:
+        return json.loads(row["results"] or "{}")
+    except Exception:
+        return {}
+
+
+def save_result(burst_id: str, platform: str, ids: list):
+    """
+    Фиксирует успех по одной площадке. Нужно, чтобы при повторе не публиковать
+    заново туда, где уже всё прошло.
+    """
+    now = time.time()
+    with _lock:
+        row = _conn.execute(
+            "SELECT results FROM bursts WHERE id = ?", (burst_id,)
+        ).fetchone()
+        try:
+            results = json.loads(row["results"] or "{}") if row else {}
+        except Exception:
+            results = {}
+        results[platform] = ids
+        _conn.execute(
+            "UPDATE bursts SET results = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(results), now, burst_id),
+        )
+        _conn.commit()
+
+
+def mark_posted(burst_id: str, threads_ids: list = None):
     now = time.time()
     with _lock:
         _conn.execute(
             "UPDATE bursts SET status = 'posted', threads_ids = ?, error = NULL,"
             " updated_at = ? WHERE id = ?",
-            (json.dumps(threads_ids), now, burst_id),
+            (json.dumps(threads_ids or []), now, burst_id),
         )
         _conn.commit()
 
@@ -280,14 +318,20 @@ def stats() -> dict:
 def recent_bursts(limit: int = 20) -> list:
     with _lock:
         rows = _conn.execute(
-            "SELECT id, status, attempts, error, candidates, created_at FROM bursts"
-            " ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, status, attempts, error, candidates, results, manifest,"
+            " created_at FROM bursts ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     out = []
     for r in rows:
         d = dict(r)
         cands = json.loads(d.pop("candidates") or "[]")
+        try:
+            d["results"] = json.loads(d.get("results") or "{}")
+        except Exception:
+            d["results"] = {}
+        manifest = d.pop("manifest", "") or ""
+        d["title"] = manifest.splitlines()[0][:80] if manifest else ""
         d["variants"] = len(cands)
         d["preview"] = (cands[0].get("text", "")[:80] if cands else "")
         out.append(d)
