@@ -72,6 +72,11 @@ STRIP_FILTER_PHRASE = _opt("STRIP_FILTER_PHRASE", "false").lower() == "true"
 BURST_WINDOW_SECONDS = int(_opt("BURST_WINDOW_SECONDS", "180"))
 # Сколько ждать после последнего сообщения пачки, прежде чем публиковать.
 BURST_WAIT_SECONDS = int(_opt("BURST_WAIT_SECONDS", "45"))
+# Сколько ждать текст, если манифест и картинки уже пришли.
+# Пачка с манифестом не закрывается как пустая, пока не истечёт это время:
+# текст от источника иногда приходит на минуту позже картинок.
+TEXT_WAIT_SECONDS = int(_opt("TEXT_WAIT_SECONDS", "600"))
+
 # Какой вариант из пачки публиковать: longest | shortest | first | last
 # Для Threads (лимит 500) обычно подходит длинный вариант.
 SELECT_STRATEGY = _opt("SELECT_STRATEGY", "longest").lower()
@@ -89,8 +94,14 @@ MANIFEST_TYPES = _opt("MANIFEST_TYPES", "")
 WORKER_INTERVAL_SECONDS = int(_opt("WORKER_INTERVAL_SECONDS", "10"))
 MAX_ATTEMPTS = int(_opt("MAX_ATTEMPTS", "5"))
 ALLOW_EMPTY_TEXT = _opt("ALLOW_EMPTY_TEXT", "true").lower() == "true"
-# Убирать хештеги из текста перед публикацией в Threads.
+# Убирать хештеги, пришедшие из источника.
 STRIP_HASHTAGS = _opt("STRIP_HASHTAGS", "false").lower() == "true"
+
+# Свои хештеги, дописываются в конец поста.
+# Формат любой: "#cs2 #esports" или "cs2, esports".
+# Теги, уже есть в тексте, повторно не добавляются.
+THREADS_HASHTAGS = _opt("THREADS_HASHTAGS", "")
+X_HASHTAGS = _opt("X_HASHTAGS", "")
 
 # --- Константы Threads API ---
 THREADS_TEXT_LIMIT = 500

@@ -271,6 +271,22 @@ def mark_posted(burst_id: str, threads_ids: list = None):
         _conn.commit()
 
 
+def reopen_burst(burst_id: str, publish_after: float):
+    """
+    Возвращает пачку в открытое состояние: манифест и картинки пришли,
+    а текст ещё нет — ждём его, вместо того чтобы публиковать пустышку.
+    Статус 'open' нужен, чтобы текст подклеился сюда, а не создал новую пачку.
+    """
+    now = time.time()
+    with _lock:
+        _conn.execute(
+            "UPDATE bursts SET status = 'open', publish_after = ?, updated_at = ?"
+            " WHERE id = ?",
+            (publish_after, now, burst_id),
+        )
+        _conn.commit()
+
+
 def mark_skipped(burst_id: str, reason: str):
     now = time.time()
     with _lock:

@@ -8,6 +8,7 @@ import threading
 import time
 
 import db
+import hashtags
 import post_filter
 import selector
 import telegram_source
@@ -15,13 +16,19 @@ import threads_api
 import x_api
 from config import (
     ALLOW_EMPTY_TEXT,
+    BURST_WAIT_SECONDS,
     MAX_ATTEMPTS,
     SELECT_STRATEGY,
     STRIP_HASHTAGS,
+    TEXT_WAIT_SECONDS,
     THREADS_ENABLED,
+    THREADS_HASHTAGS,
+    THREADS_TEXT_LIMIT,
     WORKER_INTERVAL_SECONDS,
     X_ENABLED,
+    X_HASHTAGS,
     X_SELECT_STRATEGY,
+    X_TEXT_LIMIT,
 )
 
 log = logging.getLogger("worker")
@@ -53,6 +60,7 @@ def _publish_threads(burst: dict, candidates: list) -> list:
         return None
 
     text = _clean_text(chosen.get("text", ""))
+    text = hashtags.append(text, THREADS_HASHTAGS, THREADS_TEXT_LIMIT)
     media_entries = _resolve_media(chosen)
 
     media = [
@@ -75,6 +83,7 @@ def _publish_x(burst: dict, candidates: list) -> list:
         return None
 
     text = _clean_text(chosen.get("text", ""))
+    text = hashtags.append(text, X_HASHTAGS, X_TEXT_LIMIT)
     media_entries = _resolve_media(chosen)
 
     if not text and not media_entries:
@@ -109,11 +118,33 @@ if X_ENABLED:
     PUBLISHERS.append(("x", _publish_x))
 
 
+def _has_publishable_text(candidates: list) -> bool:
+    return any(
+        c.get("text") and post_filter.matches(c["text"])
+        for c in candidates
+    )
+
+
 def _process_burst(burst: dict):
     candidates = json.loads(burst["candidates"] or "[]")
 
     if not PUBLISHERS:
         db.mark_skipped(burst["id"], "не включена ни одна площадка")
+        return
+
+    # Текста ещё нет. Если пачку открыл манифест, значит источник пришлёт
+    # текст следом — иногда с задержкой в минуту. Ждём вместо публикации
+    # пустышки, иначе текст создаст новую пачку и уйдёт без картинок.
+    if not _has_publishable_text(candidates):
+        age = time.time() - burst["created_at"]
+        if burst.get("manifest") and age < TEXT_WAIT_SECONDS:
+            db.reopen_burst(burst["id"], time.time() + BURST_WAIT_SECONDS)
+            log.info("Пачка %s: жду текст (%.0f сек из %d)",
+                     burst["id"][:8], age, TEXT_WAIT_SECONDS)
+            return
+
+        log.info("Пачка %s: публиковать нечего", burst["id"][:8])
+        db.mark_skipped(burst["id"], "нет текста с фразой-маркером")
         return
 
     # Что уже улетело в прошлые попытки — не публикуем повторно.
